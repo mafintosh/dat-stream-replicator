@@ -19,8 +19,8 @@ function replicator (dag, opts) {
     stream.destroy() // destroy any unwanted stream
   })
 
-  var pull = plex.pulled = {transferred: 0, total: 0}
-  var push = plex.pushed = {transferred: 0, total: 0}
+  var pull = plex.pulled = {transferred: 0, length: 0}
+  var push = plex.pushed = {transferred: 0, length: 0}
 
   var nodes = plex.receiveStream('nodes', {halfOpen: true})
   collect(nodes, function (err, since) {
@@ -60,7 +60,7 @@ function replicator (dag, opts) {
   return plex
 
   function onpushstart (length) {
-    push.total = length
+    push.length = length
     plex.emit('push', push)
   }
 
@@ -70,7 +70,7 @@ function replicator (dag, opts) {
   }
 
   function onpullstart (length) {
-    pull.total = length
+    pull.length = length
     plex.emit('pull', pull)
   }
 
