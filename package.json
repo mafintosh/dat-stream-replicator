@@ -5,6 +5,7 @@
   "main": "index.js",
   "dependencies": {
     "multiplex": "^6.2.2",
+    "stream-collector": "^1.0.1",
     "varint": "^4.0.0"
   },
   "devDependencies": {
