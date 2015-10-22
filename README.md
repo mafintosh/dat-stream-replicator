@@ -6,6 +6,8 @@ Streaming replicator for [dat-graph](https://github.com/mafintosh/dat-graph)
 npm install dat-stream-replicator
 ```
 
+[![build status](http://img.shields.io/travis/mafintosh/dat-stream-replicator.svg?style=flat)](http://travis-ci.org/mafintosh/dat-stream-replicator)
+
 ## Usage
 
 ``` js
