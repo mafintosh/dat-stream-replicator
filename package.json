@@ -1,6 +1,6 @@
 {
   "name": "dat-stream-replicator",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Streaming replicator for dat-graph",
   "main": "index.js",
   "scripts": {
