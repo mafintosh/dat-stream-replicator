@@ -1,6 +1,7 @@
 var multiplex = require('multiplex')
 var varint = require('varint')
 var collect = require('stream-collector')
+var pump = require('pump')
 
 module.exports = replicator
 
@@ -15,6 +16,9 @@ replicator.push = function (dag) {
 function replicator (dag, opts) {
   if (!opts) opts = {}
 
+  var missing = 2
+  var corked = false
+
   var plex = multiplex(function (stream) {
     stream.destroy() // destroy any unwanted stream
   })
@@ -26,12 +30,12 @@ function replicator (dag, opts) {
   collect(nodes, function (err, since) {
     if (err) return plex.destroy(err)
     var rs = dag.createReadStream({since: since, binary: true})
+    rs.on('error', onerror)
     rs.on('ready', function () {
-      rs.on('error', onerror)
-      onpushstart(rs.length)
       nodes.write(varint.encode(rs.length, new Buffer(varint.encodingLength(rs.length))))
-      rs.pipe(nodes)
+      onpushstart(rs.length)
       rs.on('data', onpush)
+      pump(rs, nodes, onpumped)
     })
   })
 
@@ -50,14 +54,30 @@ function replicator (dag, opts) {
     nodes.end()
     nodes.once('data', function (data) {
       var ws = dag.createWriteStream({binary: true})
-      ws.on('error', onerror)
       onpullstart(varint.decode(data))
-      nodes.pipe(ws)
       nodes.on('data', onpull)
+      pump(nodes, ws, onpumped)
     })
   })
 
+  plex.on('prefinish', function () {
+    if (!missing) return
+    corked = true
+    plex.cork()
+  })
+
   return plex
+
+  function onpumped (err) {
+    if (err) return onerror(err)
+    ondone()
+  }
+
+  function ondone () {
+    if (--missing) return
+    if (corked) plex.uncork()
+    plex.finalize()
+  }
 
   function onpushstart (length) {
     push.length = length
