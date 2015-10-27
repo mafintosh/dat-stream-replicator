@@ -1,62 +1,57 @@
+var lpstream = require('length-prefixed-stream')
 var multiplex = require('multiplex')
-var varint = require('varint')
+var protobuf = require('protocol-buffers')
 var collect = require('stream-collector')
+var crypto = require('crypto')
+var varint = require('varint')
 var pump = require('pump')
+var zlib = require('zlib')
+
+var messages = protobuf(
+  'message Handshake {' +
+  '  optional string mode = 1;' +
+  '  optional uint64 nodes = 2;' +
+  '  required bytes hash = 3;' +
+  '  optional bool gzip = 4;' +
+  '}'
+)
+
+replicator.pull = function (dat, opts) {
+  if (!opts) opts = {}
+  opts.mode = 'pull'
+  return replicator(dat, opts)
+}
+
+replicator.push = function (dat, opts) {
+  if (!opts) opts = {}
+  opts.mode = 'push'
+  return replicator(dat, opts)
+}
 
 module.exports = replicator
 
-replicator.pull = function (dag) {
-  return replicator(dag, {mode: 'pull'})
-}
-
-replicator.push = function (dag) {
-  return replicator(dag, {mode: 'push'})
-}
-
-function replicator (dag, opts) {
+function replicator (dat, opts) {
   if (!opts) opts = {}
 
+  var plex = multiplex(onstream)
+  var mode = opts.mode || 'sync'
+  var gzip = opts.gzip !== false
+  var pushed = plex.pushed = {transferred: 0, length: 0}
+  var pulled = plex.pulled = {transferred: 0, length: 0}
+
+  var local = plex.createStream('info')
+  var remote = plex.receiveStream('info')
+  var remoteMode
+  var handshake
+  var remoteHandshake
   var missing = 2
   var corked = false
 
-  var plex = multiplex(function (stream) {
-    stream.destroy() // destroy any unwanted stream
-  })
-
-  var pull = plex.pulled = {transferred: 0, length: 0}
-  var push = plex.pushed = {transferred: 0, length: 0}
-
-  var nodes = plex.receiveStream('nodes', {halfOpen: true})
-  collect(nodes, function (err, since) {
+  dat.count(function (err, count) {
     if (err) return plex.destroy(err)
-    var rs = dag.createReadStream({since: since, binary: true})
-    rs.on('error', onerror)
-    rs.on('ready', function () {
-      nodes.write(varint.encode(rs.length, new Buffer(varint.encodingLength(rs.length))))
-      onpushstart(rs.length)
-      rs.on('data', onpush)
-      pump(rs, nodes, onpumped)
-    })
-  })
-
-  var match = dag.createMatchStream({binary: true})
-  var diff = dag.createDiffStream({binary: true})
-
-  plex.receiveStream('diff').pipe(match).pipe(plex.createStream('match'))
-  plex.receiveStream('match').pipe(diff).pipe(plex.createStream('diff'))
-
-  match.on('error', onerror)
-  diff.on('error', onerror)
-
-  diff.on('end', function () {
-    var nodes = plex.createStream('nodes', {halfOpen: true})
-    for (var i = 0; i < diff.since.length; i++) nodes.write(diff.since[i])
-    nodes.end()
-    nodes.once('data', function (data) {
-      var ws = dag.createWriteStream({binary: true})
-      onpullstart(varint.decode(data))
-      nodes.on('data', onpull)
-      pump(nodes, ws, onpumped)
+    dat.heads(function (err, heads) {
+      if (err) return plex.destroy(err)
+      ready(count, hashNodes(heads))
     })
   })
 
@@ -68,38 +63,143 @@ function replicator (dag, opts) {
 
   return plex
 
-  function onpumped (err) {
-    if (err) return onerror(err)
-    ondone()
+  function ready (count, hash) {
+    if (plex.destroyed) return
+    handshake = {mode: mode, nodes: count, hash: hash, gzip: gzip}
+    local.write(messages.Handshake.encode(handshake))
+    remote.once('data', function (data) {
+      remoteHandshake = messages.Handshake.decode(data)
+      remoteMode = remoteHandshake.mode
+      if (!remoteHandshake.gzip) gzip = false
+
+      if (remoteMode === 'pull' && mode === 'pull') return plex.destroy(new Error('One side has to push'))
+      if (remoteMode === 'push' && mode === 'push') return plex.destroy(new Error('One side has to pull'))
+      if (mode !== 'sync' || remoteMode !== 'sync') missing--
+
+      var cmp = compare(handshake, remoteHandshake)
+      if (cmp === 0) onend()
+      else if (cmp < 0) onactive()
+      else onpassive()
+    })
   }
 
-  function ondone () {
-    if (--missing) return
+  function onactive () {
+    var stream = plex.createStream('diff')
+    var diff = dat.createDiffStream({binary: true})
+
+    pump(diff, stream, diff, onerror)
+    diff.on('end', function () {
+      for (var i = 0; i < diff.since.length; i++) local.write(diff.since[i])
+      local.end()
+      onsince(diff.since)
+    })
+  }
+
+  function onpassive () {
+    collect(remote, function (err, since) {
+      if (err) return plex.destroy(err)
+      onsince(since)
+    })
+  }
+
+  function onsince (since) {
+    if (mode === 'pull' || remoteMode === 'push') return
+
+    var rs = dat.createReadStream({since: since, binary: true})
+    rs.on('error', onerror)
+    rs.once('ready', function () {
+      rs.removeListener('error', onerror)
+      var nodes = createWriteStream(gzip, plex.createStream('nodes'), ondone)
+      pushed.length = rs.length
+      plex.emit('push', pushed)
+      nodes.write(varint.encode(rs.length, new Buffer(varint.encodingLength(rs.length))))
+      pump(rs, nodes, onerror)
+      rs.on('data', onpush)
+    })
+  }
+
+  function onstream (stream, id) {
+    if (id === 'diff') onreceivediff(stream)
+    else if (id === 'nodes') onnodes(createReadStream(gzip, stream, onerror))
+    else stream.destroy()
+  }
+
+  function onreceivediff (stream) {
+    var match = dat.createMatchStream({binary: true})
+    stream.halfOpen = true
+    pump(stream, match, stream, onerror)
+  }
+
+  function onnodes (stream) {
+    stream.on('error', onerror)
+    stream.once('data', function (data) {
+      stream.removeListener('error', onerror)
+      var length = pulled.length = varint.decode(data)
+      plex.emit('pull', pulled)
+      if (!length) return ondone()
+      pump(stream, dat.createWriteStream({binary: true}), ondone)
+      stream.on('data', onpull)
+    })
+  }
+
+  function onend () {
+    missing = 0
     if (corked) plex.uncork()
     plex.finalize()
   }
 
-  function onpushstart (length) {
-    push.length = length
-    plex.emit('push', push)
-  }
-
   function onpush () {
-    push.transferred++
-    plex.emit('push', push)
-  }
-
-  function onpullstart (length) {
-    pull.length = length
-    plex.emit('pull', pull)
+    pushed.transferred++
+    plex.emit('push', pushed)
   }
 
   function onpull () {
-    pull.transferred++
-    plex.emit('pull', pull)
+    pulled.transferred++
+    plex.emit('pull', pulled)
+  }
+
+  function ondone (err) {
+    if (err) return onerror(err)
+    if (!--missing) onend()
   }
 
   function onerror (err) {
-    plex.destroy(err)
+    if (err) plex.destroy(err)
   }
+}
+
+function createWriteStream (gzip, nodes, onfinish) {
+  if (!gzip) return nodes.on('finish', onfinish)
+  var enc = lpstream.encode()
+  var zip = zlib.createGzip()
+  pump(enc, zip, nodes, onfinish)
+  return enc
+}
+
+function createReadStream (gzip, nodes, onerror) {
+  if (!gzip) return nodes
+  var unzip = zlib.createGunzip()
+  var dec = lpstream.decode()
+  nodes.chunked = true
+  pump(nodes, unzip, dec, onerror)
+  return dec
+}
+
+function compare (handshake, remoteHandshake) {
+  if (handshake.nodes !== remoteHandshake.nodes) return handshake.nodes - remoteHandshake.nodes
+  return bufferCompare(handshake.hash, remoteHandshake.hash)
+}
+
+function bufferCompare (a, b) {
+  var min = Math.min(a.length, b.length)
+  for (var i = 0; i < min; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i]
+  }
+  return a.length - b.length
+}
+
+function hashNodes (list) {
+  var hash = crypto.createHash('sha256')
+  for (var i = 0; i < list.length; i++) hash.update(list[i].key)
+  return hash.digest()
 }
