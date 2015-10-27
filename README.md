@@ -24,9 +24,31 @@ stream.pipe(otherStream).pipe(stream)
 
 ## API
 
-#### `var stream = replicator(datGraph)`
+#### `var stream = replicator(datGraph, [options])`
 
 Create a new replication stream for a [dat-graph](https://github.com/mafintosh/dat-graph) instance.
+Options include:
+
+``` js
+{
+  // gzip the nodes being sent. both sides have to say `true` for gzip to be enabled
+  // defaults to true
+  gzip: true,
+  // only pull/push or do a two way sync. defaults to sync
+  mode: 'sync'
+}
+```
+
+#### `var stream = replicator.pull(datGraph, [options])`
+
+Shorthand for `{mode: 'pull'}`
+
+#### `var stream = replicator.push(datGraph, [options])`
+
+Shorthand for `{mode: 'push'}`
+
+## Progress monitoring
+
 The stream will emit progress events when pushing / pulling. The events look like this
 
 ``` js
