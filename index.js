@@ -198,7 +198,7 @@ function bufferCompare (a, b) {
   return a.length - b.length
 }
 
-function hashNodes (list) {
+function hashNodes (list) { // TODO: use framed-hash for consistency instead?
   var hash = crypto.createHash('sha256')
   for (var i = 0; i < list.length; i++) hash.update(list[i].key)
   return hash.digest()
