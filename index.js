@@ -34,7 +34,7 @@ function replicator (dat, opts) {
   if (!opts) opts = {}
 
   var plex = multiplex(onstream)
-  var mode = opts.mode || 'sync'
+  var mode = opts.mode || (opts.readonly ? 'push' : (opts.writeonly ? 'pull' : 'sync'))
   var gzip = opts.gzip !== false
   var pushed = plex.pushed = {transferred: 0, length: 0}
   var pulled = plex.pulled = {transferred: 0, length: 0}
